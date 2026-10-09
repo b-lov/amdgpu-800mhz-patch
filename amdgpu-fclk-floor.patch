@@ -1,0 +1,94 @@
+--- a/drivers/gpu/drm/amd/amdgpu/amdgpu_trace.h
++++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_trace.h
+@@ -37,7 +37,7 @@
+ #if !defined(_AMDGPU_TRACE_H) || defined(TRACE_HEADER_MULTI_READ)
+ #define _AMDGPU_TRACE_H_
+ 
+-#define TRACE_INCLUDE_PATH drivers/gpu/drm/amd/amdgpu
++#define TRACE_INCLUDE_PATH .
+ #define TRACE_INCLUDE_FILE amdgpu_trace
+ 
+--- a/drivers/gpu/drm/amd/display/dc/clk_mgr/dcn314/dcn314_clk_mgr.c
++++ b/drivers/gpu/drm/amd/display/dc/clk_mgr/dcn314/dcn314_clk_mgr.c
+@@ -683,7 +683,7 @@ static void dcn314_clk_mgr_helper_populate_bw_params(struct clk_mgr_internal *
+ 		bw_params->clk_table.entries[i].dtbclk_mhz = bw_params->clk_table.entries[j].dtbclk_mhz;
+ 
+ 		/* Now update clocks we do read */
+-		bw_params->clk_table.entries[i].fclk_mhz = min_fclk;
++		bw_params->clk_table.entries[i].fclk_mhz = min_fclk < 800 ? 800 : min_fclk;
+ 		bw_params->clk_table.entries[i].memclk_mhz = clock_table->DfPstateTable[min_pstate].MemClk;
+ 		bw_params->clk_table.entries[i].voltage = clock_table->DfPstateTable[min_pstate].Voltage;
+ 		bw_params->clk_table.entries[i].dcfclk_mhz = clock_table->DcfClocks[i];
+--- a/drivers/gpu/drm/amd/pm/swsmu/smu13/smu_v13_0_4_ppt.c
++++ b/drivers/gpu/drm/amd/pm/swsmu/smu13/smu_v13_0_4_ppt.c
+@@ -461,6 +461,8 @@ static int smu_v13_0_4_get_dpm_freq_by_index(struct smu_context *smu,
+ 	case SMU_FCLK:
+ 		if (dpm_level >= clk_table->NumDfPstatesEnabled)
+ 			return -EINVAL;
+ 		*freq = clk_table->DfPstateTable[dpm_level].FClk;
++		if (*freq < 800)
++			*freq = 800;
+ 		break;
+@@ -862,6 +864,10 @@ static int smu_v13_0_4_set_soft_freq_limited_range(struct smu_context *smu,
+ 	case SMU_FCLK:
++		if (min_clk < 800) {
++			dev_info(smu->adev->dev, "[amdgpu_fclk_fix] SetHardMinFclkByFreq clamped from %u to 800 MHz\n", min_clk);
++			min_clk = 800;
++		}
+ 		msg_set_min = SMU_MSG_SetHardMinFclkByFreq;
+ 		msg_set_max = SMU_MSG_SetSoftMaxFclkByFreq;
+ 		break;
+@@ -1015,6 +1021,8 @@ static int smu_v13_0_4_set_performance_level(struct smu_context *smu,
+ 		smu_v13_0_4_get_dpm_ultimate_freq(smu, SMU_SOCCLK, &socclk_min, &socclk_max);
+ 		smu_v13_0_4_get_dpm_ultimate_freq(smu, SMU_VCLK, &vclk_min, &vclk_max);
+ 		smu_v13_0_4_get_dpm_ultimate_freq(smu, SMU_DCLK, &dclk_min, &dclk_max);
++		if (fclk_min < 800)
++			fclk_min = 800;
+ 		break;
+@@ -1104,6 +1112,37 @@ static int smu_v13_0_4_set_fine_grain_gfx_freq_parameters(struct smu_context *s
+ 	return 0;
+ }
+ 
++static int smu_v13_0_4_set_default_dpm_tables(struct smu_context *smu)
++{
++	struct smu_table_context *smu_table = &smu->smu_table;
++	int ret;
++
++	ret = smu_cmn_update_table(smu, SMU_TABLE_DPMCLOCKS, 0,
++				    smu_table->clocks_table, false);
++	if (ret)
++		return ret;
++
++	if (smu_table->clocks_table) {
++		DpmClocks_t *clk_table = smu_table->clocks_table;
++		int i;
++		for (i = 0; i < clk_table->NumDfPstatesEnabled; i++) {
++			if (clk_table->DfPstateTable[i].FClk < 800) {
++				dev_info(smu->adev->dev, "[amdgpu_fclk_fix] Clamping DfPstate %d FClk from %u to 800 MHz\n",
++					 i, clk_table->DfPstateTable[i].FClk);
++				clk_table->DfPstateTable[i].FClk = 800;
++			}
++		}
++	}
++
++	ret = smu_v13_0_4_set_soft_freq_limited_range(smu, SMU_FCLK, 800, 1600);
++	if (ret)
++		dev_warn(smu->adev->dev, "[amdgpu_fclk_fix] Failed to set initial FCLK range: %d\n", ret);
++	else
++		dev_info(smu->adev->dev, "[amdgpu_fclk_fix] Set initial FCLK range 800-1600 MHz\n");
++
++	return 0;
++}
++
+ static const struct pptable_funcs smu_v13_0_4_ppt_funcs = {
+ 	.check_fw_status = smu_v13_0_check_fw_status,
+ 	.check_fw_version = smu_cmn_check_fw_version,
+@@ -1112,7 +1151,7 @@ static const struct pptable_funcs smu_v13_0_4_ppt_funcs = {
+ 	.system_features_control = smu_v13_0_4_system_features_control,
+ 	.dpm_set_vcn_enable = smu_v13_0_set_vcn_enable,
+ 	.dpm_set_jpeg_enable = smu_v13_0_set_jpeg_enable,
+-	.set_default_dpm_table = smu_v13_0_set_default_dpm_tables,
++	.set_default_dpm_table = smu_v13_0_4_set_default_dpm_tables,
+ 	.read_sensor = smu_v13_0_4_read_sensor,
+ 	.is_dpm_running = smu_v13_0_4_is_dpm_running,
+ 	.set_watermarks_table = smu_v13_0_4_set_watermarks_table,
